@@ -126,10 +126,13 @@ else
   fi
 
   log "Installing core dependencies..."
+  # Pin versions cho đồng bộ — huggingface_hub>=0.23 bỏ cached_download
+  # diffusers>=0.28 đã dùng hf_hub_download thay thế
   pip install \
-    diffusers==0.27.2 \
-    transformers==4.40.0 \
-    accelerate \
+    "diffusers>=0.28.0" \
+    "transformers>=4.40.0" \
+    "huggingface_hub>=0.23.0" \
+    "accelerate>=0.30.0" \
     safetensors \
     peft \
     insightface \
@@ -137,7 +140,6 @@ else
     onnxruntime \
     onnxslim \
     "optimum[exporters]" \
-    huggingface_hub \
     opencv-python \
     Pillow \
     numpy \

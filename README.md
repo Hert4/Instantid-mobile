@@ -71,6 +71,13 @@ Colab free (T4 16GB) hoặc Pro (A100 40GB) đều đủ dùng.
 **1. Tạo notebook mới, chọn Runtime → T4 GPU, rồi chạy:**
 
 ```python
+# Cell 0 — Fix version conflict trước (Colab cài sẵn diffusers cũ)
+!pip install -q "diffusers>=0.28.0" "huggingface_hub>=0.23.0" "transformers>=4.40.0"
+import importlib, diffusers
+importlib.reload(diffusers)
+```
+
+```python
 # Cell 1 — Clone repo + setup
 !git clone https://github.com/Hert4/Instantid-mobile
 %cd Instantid-mobile
