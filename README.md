@@ -50,8 +50,8 @@ instantid-mobile/
 > RTX 3070 / 4070 (8–12GB VRAM) đủ dùng — export từng phần và dùng `--device cpu` nếu VRAM không đủ load toàn bộ model cùng lúc.
 
 ```bash
-git clone <repo> instantid-mobile
-cd instantid-mobile
+git clone https://github.com/Hert4/Instantid-mobile
+cd Instantid-mobile
 
 # Tải deps + clone OnnxStream + tải tất cả model weights (~30GB)
 ./setup.sh --gpu
@@ -72,8 +72,8 @@ Colab free (T4 16GB) hoặc Pro (A100 40GB) đều đủ dùng.
 
 ```python
 # Cell 1 — Clone repo + setup
-!git clone https://github.com/your-username/instantid-mobile
-%cd instantid-mobile
+!git clone https://github.com/Hert4/Instantid-mobile
+%cd Instantid-mobile
 !./setup.sh --gpu
 ```
 
