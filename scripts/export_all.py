@@ -33,6 +33,17 @@ import os
 import sys
 from pathlib import Path
 
+# ── Fix 1: patch cached_download trước khi import diffusers ──────────────────
+# diffusers<=0.27 dùng huggingface_hub.cached_download đã bị xóa ở hub>=0.23
+# Patch bằng cách alias hf_hub_download thay thế
+try:
+    import huggingface_hub
+    if not hasattr(huggingface_hub, "cached_download"):
+        huggingface_hub.cached_download = huggingface_hub.hf_hub_download
+except Exception:
+    pass
+# ─────────────────────────────────────────────────────────────────────────────
+
 import torch
 import numpy as np
 
@@ -597,18 +608,46 @@ def export_ip_adapter(args, dtype):
         if k.startswith("image_proj.")
     }
 
-    # Khởi tạo Resampler với config của InstantID
-    # Từ ip-adapter.bin: embedding_dim=512 (InsightFace glintr100 output)
-    #                    output_dim=2048 (SDXL cross_attention_dim)
-    #                    num_queries=16
+    if not image_proj_state:
+        raise ValueError("ip-adapter.bin không có key 'image_proj.*' — file bị lỗi hoặc sai format")
+
+    # ── Fix 2: tự detect Resampler config từ state_dict thay vì hardcode ──
+    # Đọc shape thực tế từ weights để tránh mismatch
+    print("  Detecting Resampler config from state_dict...")
+    proj_in_w  = image_proj_state.get("proj_in.weight")   # [dim, embedding_dim]
+    proj_out_w = image_proj_state.get("proj_out.weight")   # [output_dim, dim]
+    latents    = image_proj_state.get("latents")           # [1, num_queries, dim]
+
+    if proj_in_w is None or proj_out_w is None or latents is None:
+        print("  Available keys:", list(image_proj_state.keys())[:10])
+        raise ValueError("Không tìm thấy proj_in/proj_out/latents trong state_dict")
+
+    dim           = proj_in_w.shape[0]        # e.g. 1024
+    embedding_dim = proj_in_w.shape[1]        # e.g. 512
+    output_dim    = proj_out_w.shape[0]       # e.g. 2048
+    num_queries   = latents.shape[1]          # e.g. 16
+
+    # Đếm số layers từ keys
+    depth = sum(1 for k in image_proj_state if k.startswith("layers.") and k.endswith(".to_q.weight"))
+
+    # Detect dim_head và heads từ to_q weight: [inner_dim, dim] where inner_dim = heads * dim_head
+    to_q_w    = image_proj_state.get("layers.0.0.to_q.weight")
+    inner_dim = to_q_w.shape[0] if to_q_w is not None else dim
+    # Thường dim_head=64, heads = inner_dim // 64
+    dim_head  = 64
+    heads     = max(1, inner_dim // dim_head)
+
+    print(f"  Detected config: dim={dim}, depth={depth}, heads={heads}, "
+          f"num_queries={num_queries}, embedding_dim={embedding_dim}, output_dim={output_dim}")
+
     resampler = Resampler(
-        dim=1024,
-        depth=4,
-        dim_head=64,
-        heads=16,
-        num_queries=16,
-        embedding_dim=512,
-        output_dim=2048,
+        dim=dim,
+        depth=depth,
+        dim_head=dim_head,
+        heads=heads,
+        num_queries=num_queries,
+        embedding_dim=embedding_dim,
+        output_dim=output_dim,
         ff_mult=4,
     )
     resampler.load_state_dict(image_proj_state, strict=True)

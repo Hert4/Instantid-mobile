@@ -25,6 +25,15 @@ Requirements:
 import argparse
 import os
 import gc
+
+# Patch cached_download trước khi import diffusers
+try:
+    import huggingface_hub
+    if not hasattr(huggingface_hub, "cached_download"):
+        huggingface_hub.cached_download = huggingface_hub.hf_hub_download
+except Exception:
+    pass
+
 import torch
 from diffusers import StableDiffusionXLPipeline, LCMScheduler
 from diffusers.utils import logging

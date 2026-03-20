@@ -39,6 +39,14 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Patch cached_download
+try:
+    import huggingface_hub
+    if not hasattr(huggingface_hub, "cached_download"):
+        huggingface_hub.cached_download = huggingface_hub.hf_hub_download
+except Exception:
+    pass
+
 
 def parse_args():
     p = argparse.ArgumentParser()
