@@ -85,8 +85,14 @@ def quantize_model(input_path: str, output_path: str,
         print(f"  [skip] {os.path.basename(output_path)} already exists")
         return
 
-    input_size = os.path.getsize(input_path) / 1024**2
-    print(f"  Input:  {input_size:.0f} MB")
+    # Tính tổng size (bao gồm external data nếu có)
+    input_dir = os.path.dirname(input_path)
+    input_size = sum(
+        os.path.getsize(os.path.join(input_dir, f))
+        for f in os.listdir(input_dir)
+        if os.path.isfile(os.path.join(input_dir, f))
+    ) / 1024**2
+    print(f"  Input:  {input_size:.0f} MB (total dir)")
     print(f"  Output: {output_path}")
 
     t0 = time.time()
@@ -212,7 +218,13 @@ def main():
             print(f"         Run: python scripts/export_all.py --only {comp['name']}")
             continue
 
-        input_mb = os.path.getsize(comp["input"]) / 1024**2
+        # Tính tổng size bao gồm external data (.pb files)
+        input_dir = os.path.dirname(comp["input"])
+        input_mb = sum(
+            os.path.getsize(os.path.join(input_dir, f))
+            for f in os.listdir(input_dir)
+            if os.path.isfile(os.path.join(input_dir, f))
+        ) / 1024**2
         total_input_mb += input_mb
 
         if comp["quantize"]:

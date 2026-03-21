@@ -75,51 +75,188 @@ def torch_dtype(dtype_str):
     return torch.float16 if dtype_str == "float16" else torch.float32
 
 
+def _onnx_export_call(model, dummy_inputs, output_path, export_kwargs,
+                      export_params=True):
+    """Call torch.onnx.export with dynamo=False fallback."""
+    kw = {**export_kwargs, "export_params": export_params}
+    try:
+        torch.onnx.export(model, dummy_inputs, output_path,
+                          dynamo=False, **kw)
+    except TypeError:
+        torch.onnx.export(model, dummy_inputs, output_path, **kw)
+
+
+def _model_param_mb(model):
+    """Tổng size parameters (MB)."""
+    return sum(p.nelement() * p.element_size()
+               for p in model.parameters()) / 1024**2
+
+
+def _dir_total_mb(dirpath):
+    """Tổng size tất cả files trong directory (MB)."""
+    total = 0
+    if os.path.isdir(dirpath):
+        for f in os.listdir(dirpath):
+            fp = os.path.join(dirpath, f)
+            if os.path.isfile(fp):
+                total += os.path.getsize(fp)
+    return total / 1024**2
+
+
 def save_onnx(model, dummy_inputs, output_path, input_names, output_names,
               dynamic_axes, opset):
+    """
+    Export model to ONNX. Automatically uses external data format for
+    large models (> 1.5 GB params) to bypass protobuf's 2 GB limit.
+    """
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    print(f"  → Exporting to {output_path} ...")
-    with torch.no_grad():
-        # ── Cast to float32 CPU for reliable ONNX serialization ──────────
-        # float16 on CUDA → TorchScript exporter often produces empty/corrupt
-        # ONNX files (graph skeleton only, no weights). Export float32 → then
-        # quantize to INT8 via quantize_all.py.
-        print("    Casting model to float32 CPU for ONNX export...")
-        model = model.float().cpu()
-        if isinstance(dummy_inputs, tuple):
-            dummy_inputs = tuple(
-                x.float().cpu() if x.is_floating_point() else x.cpu()
-                for x in dummy_inputs
-            )
-        elif isinstance(dummy_inputs, torch.Tensor):
-            dummy_inputs = dummy_inputs.float().cpu() if dummy_inputs.is_floating_point() else dummy_inputs.cpu()
+    param_mb = _model_param_mb(model)
 
-        # dynamo=False: force legacy ONNX exporter (TorchScript-based).
-        # PyTorch 2.5+ mặc định dùng dynamo exporter mới, nhưng nó không
-        # tương thích với diffusion models (ControlNet added_cond_kwargs,
-        # dynamic tuple outputs, opset version mismatch với onnxscript).
-        export_kwargs = dict(
-            opset_version=opset,
-            input_names=input_names,
-            output_names=output_names,
-            dynamic_axes=dynamic_axes,
-            do_constant_folding=True,
+    export_kwargs = dict(
+        opset_version=opset,
+        input_names=input_names,
+        output_names=output_names,
+        dynamic_axes=dynamic_axes,
+        do_constant_folding=True,
+    )
+
+    # ── Large model path: export_params=False → inject external data ─────
+    if param_mb > 1500:
+        print(f"  → Large model ({param_mb:.0f} MB) — using external data format")
+        _export_with_external_data(
+            model, dummy_inputs, output_path, input_names, export_kwargs,
         )
-        # Thử force legacy exporter nếu PyTorch hỗ trợ dynamo param
-        try:
-            torch.onnx.export(
-                model, dummy_inputs, output_path,
-                dynamo=False,
-                **export_kwargs,
-            )
-        except TypeError:
-            # PyTorch cũ không có param dynamo → gọi bình thường
-            torch.onnx.export(
-                model, dummy_inputs, output_path,
-                **export_kwargs,
-            )
-    size_mb = os.path.getsize(output_path) / 1024**2
-    print(f"  ✓ Saved {size_mb:.0f} MB")
+    else:
+        # ── Small model path: normal export ──────────────────────────────
+        print(f"  → Exporting to {output_path} ({param_mb:.0f} MB params)...")
+        with torch.no_grad():
+            _onnx_export_call(model, dummy_inputs, output_path, export_kwargs)
+
+    # ── Report total output size ─────────────────────────────────────────
+    output_dir = os.path.dirname(output_path)
+    total_mb = _dir_total_mb(output_dir)
+    print(f"  Files:")
+    for f in sorted(os.listdir(output_dir)):
+        fp = os.path.join(output_dir, f)
+        if os.path.isfile(fp):
+            print(f"    {f}: {os.path.getsize(fp) / 1024**2:.1f} MB")
+    print(f"  ✓ Total: {total_mb:.0f} MB")
+
+
+def _export_with_external_data(model, dummy_inputs, output_path,
+                               input_names, export_kwargs):
+    """
+    Export large models (> 2 GB) with ONNX external data format.
+
+    Problem: protobuf has a 2 GB message size limit. torch.onnx.export
+    serializes the entire model (graph + weights) as a single protobuf,
+    which silently truncates models > 2 GB.
+
+    Solution:
+      1. Export graph WITHOUT parameters (export_params=False) → tiny .onnx
+      2. Load the graph-only ONNX
+      3. Convert parameter graph-inputs → initializers backed by external data
+      4. Save: small .onnx (graph) + large .data (weights)
+    """
+    import onnx
+    from onnx import numpy_helper, TensorProto
+
+    output_dir = os.path.dirname(output_path)
+
+    # Step 1: Export graph structure only (no weights → well under 2 GB)
+    graph_path = os.path.join(output_dir, "_graph_only.onnx")
+    print(f"    Step 1/3: Exporting graph structure (no weights)...")
+    with torch.no_grad():
+        _onnx_export_call(model, dummy_inputs, graph_path, export_kwargs,
+                          export_params=False)
+    print(f"    Graph: {os.path.getsize(graph_path) / 1024**2:.1f} MB")
+
+    # Step 2: Load graph and identify parameter inputs
+    print(f"    Step 2/3: Loading graph + collecting parameters...")
+    onnx_model = onnx.load(graph_path)
+
+    regular_input_set = set(input_names)
+    param_inputs = []
+    keep_inputs = []
+    for inp in onnx_model.graph.input:
+        if inp.name in regular_input_set:
+            keep_inputs.append(inp)
+        else:
+            param_inputs.append(inp)
+
+    # Collect PyTorch param values (name → numpy)
+    # export_params=False uses PyTorch param names as ONNX input names
+    param_values = {}
+    for name, p in model.named_parameters():
+        param_values[name] = p.detach().cpu().numpy()
+    for name, b in model.named_buffers():
+        param_values[name] = b.detach().cpu().numpy()
+
+    print(f"    Graph inputs: {len(keep_inputs)} regular + "
+          f"{len(param_inputs)} parameters")
+    print(f"    PyTorch params: {len(param_values)}")
+
+    # Step 3: Write external data file + create initializers
+    print(f"    Step 3/3: Writing external data...")
+    data_filename = "weights.pb"
+    data_path = os.path.join(output_dir, data_filename)
+
+    offset = 0
+    matched = 0
+    unmatched = []
+
+    with open(data_path, "wb") as df:
+        for pinp in param_inputs:
+            name = pinp.name
+            value = param_values.get(name)
+            if value is None:
+                # Try "/" → "." replacement
+                alt = name.replace("/", ".")
+                value = param_values.get(alt)
+
+            if value is None:
+                unmatched.append(name)
+                continue
+
+            raw = value.tobytes()
+            df.write(raw)
+
+            # Create ONNX tensor proto with external data reference
+            tensor = numpy_helper.from_array(value, name=name)
+            tensor.ClearField("raw_data")
+            tensor.data_location = TensorProto.EXTERNAL
+            del tensor.external_data[:]
+            entry_loc = tensor.external_data.add()
+            entry_loc.key = "location"
+            entry_loc.value = data_filename
+            entry_off = tensor.external_data.add()
+            entry_off.key = "offset"
+            entry_off.value = str(offset)
+            entry_len = tensor.external_data.add()
+            entry_len.key = "length"
+            entry_len.value = str(len(raw))
+
+            onnx_model.graph.initializer.append(tensor)
+            offset += len(raw)
+            matched += 1
+
+    # Replace inputs: remove param inputs, keep regular inputs only
+    del onnx_model.graph.input[:]
+    for inp in keep_inputs:
+        onnx_model.graph.input.append(inp)
+
+    # Save final model
+    onnx.save(onnx_model, output_path)
+
+    # Cleanup temp
+    if os.path.exists(graph_path):
+        os.remove(graph_path)
+
+    data_mb = os.path.getsize(data_path) / 1024**2
+    if unmatched:
+        print(f"    ⚠ {len(unmatched)} unmatched params (first 5: "
+              f"{unmatched[:5]})")
+    print(f"    Frozen {matched} params → external data {data_mb:.0f} MB")
 
 
 def report_size(path):
