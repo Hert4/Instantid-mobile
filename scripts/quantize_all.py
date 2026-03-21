@@ -62,6 +62,10 @@ def parse_args():
                    help="Per-channel quantization (better quality, default=True)")
     p.add_argument("--reduce_range", action="store_true", default=False,
                    help="Reduce range (for Haswell+ CPUs, less impact on mobile)")
+    p.add_argument("--skip_slim",    action="store_true", default=False,
+                   help="Skip onnxslim graph optimization (saves RAM for large models)")
+    p.add_argument("--slim_max_mb",  type=float, default=2048,
+                   help="Auto-skip onnxslim for models larger than this (MB, default=2048)")
     return p.parse_args()
 
 
@@ -212,10 +216,15 @@ def main():
         total_input_mb += input_mb
 
         if comp["quantize"]:
-            # Step 1: Slim/optimize graph
-            slim_path = comp["input"].replace(".onnx", "_slim.onnx")
-            print(f"  Step 1/2: Graph optimization...")
-            onnx_slim(comp["input"], slim_path)
+            # Step 1: Slim/optimize graph (skip for large models to avoid OOM)
+            skip_slim = args.skip_slim or (input_mb > args.slim_max_mb)
+            if skip_slim:
+                slim_path = comp["input"]  # quantize trực tiếp từ file gốc
+                print(f"  Step 1/2: Graph optimization... [SKIP — {input_mb:.0f}MB > {args.slim_max_mb:.0f}MB threshold]")
+            else:
+                slim_path = comp["input"].replace(".onnx", "_slim.onnx")
+                print(f"  Step 1/2: Graph optimization...")
+                onnx_slim(comp["input"], slim_path)
 
             # Step 2: Quantize
             print(f"  Step 2/2: INT8 quantization...")
@@ -227,7 +236,7 @@ def main():
                     reduce_range=args.reduce_range,
                 )
                 # Cleanup slim temp file
-                if os.path.exists(slim_path) and slim_path != comp["input"]:
+                if not skip_slim and os.path.exists(slim_path) and slim_path != comp["input"]:
                     os.remove(slim_path)
             except Exception as e:
                 print(f"  [ERROR] Quantization failed: {e}")
