@@ -757,12 +757,20 @@ def main():
     print(f"  Opset:     {args.opset}")
 
     # ──────────────────────────────────────────────────────────────────────
-    # Validate paths
-    for path, name in [
-        (args.sdxl_path, "SDXL model"),
-        (args.controlnet_path, "ControlNet"),
-        (args.ip_adapter_path, "IP-Adapter"),
-    ]:
+    # Validate paths — chỉ check những path cần thiết cho component đang export
+    needs_sdxl = args.only in (None, "unet", "text_encoders", "vae")
+    needs_controlnet = args.only in (None, "controlnet")
+    needs_ip_adapter = args.only in (None, "ip_adapter", "unet")
+
+    path_checks = []
+    if needs_sdxl:
+        path_checks.append((args.sdxl_path, "SDXL model"))
+    if needs_controlnet:
+        path_checks.append((args.controlnet_path, "ControlNet"))
+    if needs_ip_adapter:
+        path_checks.append((args.ip_adapter_path, "IP-Adapter"))
+
+    for path, name in path_checks:
         if not os.path.exists(path):
             raise FileNotFoundError(
                 f"{name} not found: {path}\n"
