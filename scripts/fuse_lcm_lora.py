@@ -98,10 +98,17 @@ def fuse_lora_weights(args):
         "float32": torch.float32,
         "bfloat16": torch.bfloat16,
     }
-    torch_dtype = dtype_map[args.dtype]
+
+    # CPU không hỗ trợ float16 → tự chuyển sang float32
+    if args.device == "cpu" and args.dtype == "float16":
+        print("  [auto] CPU không hỗ trợ float16, chuyển sang float32 để fuse")
+        print("         (Weights vẫn save dưới dạng safetensors, export_all.py sẽ load lại đúng dtype)")
+        torch_dtype = torch.float32
+    else:
+        torch_dtype = dtype_map[args.dtype]
 
     print(f"[1/5] Loading SDXL pipeline from {args.sdxl_path}")
-    print(f"      dtype={args.dtype}, device={args.device}")
+    print(f"      dtype={torch_dtype}, device={args.device}")
 
     # Load pipeline — chỉ cần UNet để fuse, nhưng diffusers cần full pipeline
     load_kwargs = {
@@ -137,12 +144,18 @@ def fuse_lora_weights(args):
     print("\n[3/5] Fusing LoRA weights into UNet...")
     print("  This permanently merges LoRA deltas: W_new = W + scale * (B @ A)")
 
-    # fuse_lora() merge weights và xóa LoRA layers
+    # fuse_lora() merge weights: W_new = W + scale * (B @ A)
     pipe.fuse_lora(lora_scale=args.lora_scale)
+
+    # unload_lora_weights() xóa LoRA adapter layers khỏi graph
+    # (fuse_lora chỉ merge weights, adapter modules vẫn còn cho đến khi unload)
+    pipe.unload_lora_weights()
 
     # Verify không còn LoRA adapters
     has_lora = any("lora" in name.lower() for name, _ in pipe.unet.named_parameters())
     print(f"  LoRA layers remaining: {has_lora} (should be False)")
+    if has_lora:
+        print("  [warn] Một số LoRA layers chưa được fuse — có thể do diffusers version")
 
     print("\n[4/5] Replacing scheduler with LCMScheduler...")
     # Thay scheduler bằng LCM để inference chỉ cần 4-8 steps
@@ -153,9 +166,6 @@ def fuse_lora_weights(args):
 
     print(f"\n[5/5] Saving fused model to {args.output_path}")
     os.makedirs(args.output_path, exist_ok=True)
-
-    # Unload LoRA state (sau fuse thì không còn adapter nữa)
-    pipe.unload_lora_weights()
 
     pipe.save_pretrained(args.output_path)
     print(f"  Saved successfully!")
