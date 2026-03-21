@@ -29,6 +29,8 @@ Prompt text    →  [CLIP]         →  text embeddings
 ```
 instantid-mobile/
 ├── setup.sh                      # Tải deps + models (chạy 1 lần)
+├── notebooks/
+│   └── instantid_mobile.ipynb    # Notebook chạy trên Google Colab
 ├── scripts/
 │   ├── fuse_lcm_lora.py          # Bước 1: gộp LCM-LoRA vào UNet
 │   ├── export_all.py             # Bước 2: export sang ONNX
@@ -68,62 +70,17 @@ cd Instantid-mobile
 
 Colab free (T4 16GB) hoặc Pro (A100 40GB) đều đủ dùng.
 
-**1. Tạo notebook mới, chọn Runtime → T4 GPU, rồi chạy:**
+Mở notebook có sẵn: [`notebooks/instantid_mobile.ipynb`](notebooks/instantid_mobile.ipynb)
 
-```python
-# Cell 0 — Fix version conflict trước (Colab cài sẵn diffusers cũ)
-!pip install -q "diffusers>=0.28.0" "huggingface_hub>=0.23.0" "transformers>=4.40.0"
-import importlib, diffusers
-importlib.reload(diffusers)
-```
-
-```python
-# Cell 1 — Clone repo + setup
-!git clone https://github.com/Hert4/Instantid-mobile
-%cd Instantid-mobile
-!./setup.sh --gpu
-```
-
-```python
-# Cell 2 — Fuse LCM-LoRA
-!python scripts/fuse_lcm_lora.py
-```
-
-```python
-# Cell 3 — Export ONNX (làm từng phần để tránh OOM)
-!python scripts/export_all.py --only text_encoders
-!python scripts/export_all.py --only ip_adapter
-!python scripts/export_all.py --only controlnet
-!python scripts/export_all.py --only vae
-!python scripts/export_all.py --only unet   # cái này nặng nhất, ~8GB VRAM
-```
-
-```python
-# Cell 4 — Quantize
-!python scripts/quantize_all.py
-```
-
-```python
-# Cell 5 — Convert cho mobile
-!python scripts/convert_for_onnxstream.py
-```
-
-```python
-# Cell 6 — Tải về máy (zip folder onnxstream-models)
-import shutil
-shutil.make_archive("onnxstream-models", "zip", "onnxstream-models")
-
-from google.colab import files
-files.download("onnxstream-models.zip")
-```
+Hoặc upload lên Colab → Runtime → Change runtime type → T4 GPU → Run All.
 
 **Lưu ý khi dùng Colab:**
 
+- **Disk:** Colab chỉ có ~112 GB — pipeline tự xóa source models sau mỗi bước export để tránh hết dung lượng
 - Session tự disconnect sau ~90 phút idle — dùng Google Drive để lưu checkpoint giữa chừng:
   ```python
   from google.colab import drive
   drive.mount('/content/drive')
-  # Sau mỗi bước nặng, copy kết quả sang Drive:
   !cp -r onnx/ /content/drive/MyDrive/instantid-mobile/
   ```
 - Export ONNX mất ~1–2 giờ — bật "Keep awake" trên trình duyệt hoặc dùng Colab Pro

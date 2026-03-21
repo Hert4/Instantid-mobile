@@ -283,12 +283,17 @@ def _inject_ip_adapter_into_unet(unet, ip_adapter_path, dtype):
     print("  Injecting IP-Adapter weights into UNet attention processors...")
     state_dict = torch.load(ip_adapter_path, map_location="cpu")
 
-    # Tách ip_adapter weights (bỏ image_proj)
-    ip_layers = {
-        k.replace("ip_adapter.", ""): v
-        for k, v in state_dict.items()
-        if k.startswith("ip_adapter.")
-    }
+    # ── Detect nested vs flat format (same fix as export_ip_adapter) ──
+    if "ip_adapter" in state_dict and isinstance(state_dict["ip_adapter"], dict):
+        # Nested dict format (InstantID official)
+        ip_layers = state_dict["ip_adapter"]
+    else:
+        # Flat keys format
+        ip_layers = {
+            k.replace("ip_adapter.", ""): v
+            for k, v in state_dict.items()
+            if k.startswith("ip_adapter.")
+        }
 
     # Set attention processors
     attn_procs = {}
@@ -601,15 +606,34 @@ def export_ip_adapter(args, dtype):
     print(f"  Loading ip-adapter from {args.ip_adapter_path}...")
     state_dict = torch.load(args.ip_adapter_path, map_location="cpu")
 
-    # Tách image_proj weights
-    image_proj_state = {
-        k.replace("image_proj.", ""): v
-        for k, v in state_dict.items()
-        if k.startswith("image_proj.")
-    }
+    # ── InstantID ip-adapter.bin có thể có 2 format: ──
+    # Format A (flat): {"image_proj.proj_in.weight": ..., "ip_adapter.1.to_k_ip.weight": ...}
+    # Format B (nested dict): {"image_proj": {"proj_in.weight": ...}, "ip_adapter": {...}}
+    #
+    # Detect format tự động:
+    image_proj_state = {}
+
+    if "image_proj" in state_dict and isinstance(state_dict["image_proj"], dict):
+        # Format B: nested dict — InstantID official format
+        print("  Detected nested dict format (InstantID official)")
+        image_proj_state = state_dict["image_proj"]
+    else:
+        # Format A: flat keys
+        image_proj_state = {
+            k.replace("image_proj.", ""): v
+            for k, v in state_dict.items()
+            if k.startswith("image_proj.")
+        }
 
     if not image_proj_state:
-        raise ValueError("ip-adapter.bin không có key 'image_proj.*' — file bị lỗi hoặc sai format")
+        # Debug: in top-level keys để biết cấu trúc thực tế
+        top_keys = list(state_dict.keys())[:20]
+        sample_types = {k: type(v).__name__ for k, v in list(state_dict.items())[:5]}
+        raise ValueError(
+            f"ip-adapter.bin không có key 'image_proj.*'\n"
+            f"Top-level keys ({len(state_dict)}): {top_keys}\n"
+            f"Sample value types: {sample_types}"
+        )
 
     # ── Fix 2: tự detect Resampler config từ state_dict thay vì hardcode ──
     # Đọc shape thực tế từ weights để tránh mismatch

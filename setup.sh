@@ -137,6 +137,7 @@ else
     peft \
     insightface \
     onnx \
+    onnxscript \
     onnxruntime \
     onnxslim \
     "optimum[exporters]" \
