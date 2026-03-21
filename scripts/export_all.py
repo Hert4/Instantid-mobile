@@ -59,7 +59,7 @@ def parse_args():
     p.add_argument("--controlnet_path",  default="./checkpoints/ControlNetModel")
     p.add_argument("--ip_adapter_path",  default="./checkpoints/ip-adapter.bin")
     p.add_argument("--output_dir",       default="./onnx")
-    p.add_argument("--opset",            type=int, default=17)
+    p.add_argument("--opset",            type=int, default=18)
     p.add_argument("--dtype",            default="float16",
                    choices=["float16", "float32"])
     p.add_argument("--only",             default=None,
@@ -80,16 +80,30 @@ def save_onnx(model, dummy_inputs, output_path, input_names, output_names,
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     print(f"  → Exporting to {output_path} ...")
     with torch.no_grad():
-        torch.onnx.export(
-            model,
-            dummy_inputs,
-            output_path,
+        # dynamo=False: force legacy ONNX exporter (TorchScript-based).
+        # PyTorch 2.5+ mặc định dùng dynamo exporter mới, nhưng nó không
+        # tương thích với diffusion models (ControlNet added_cond_kwargs,
+        # dynamic tuple outputs, opset version mismatch với onnxscript).
+        export_kwargs = dict(
             opset_version=opset,
             input_names=input_names,
             output_names=output_names,
             dynamic_axes=dynamic_axes,
             do_constant_folding=True,
         )
+        # Thử force legacy exporter nếu PyTorch hỗ trợ dynamo param
+        try:
+            torch.onnx.export(
+                model, dummy_inputs, output_path,
+                dynamo=False,
+                **export_kwargs,
+            )
+        except TypeError:
+            # PyTorch cũ không có param dynamo → gọi bình thường
+            torch.onnx.export(
+                model, dummy_inputs, output_path,
+                **export_kwargs,
+            )
     size_mb = os.path.getsize(output_path) / 1024**2
     print(f"  ✓ Saved {size_mb:.0f} MB")
 
@@ -522,19 +536,28 @@ def export_controlnet(args, dtype):
         """
         Flatten tuple output thành flat positional outputs cho ONNX.
         ONNX không support dynamic-length tuple outputs.
+
+        SDXL ControlNet cần added_cond_kwargs (text_embeds, time_ids) —
+        nếu không truyền sẽ gặp lỗi 'NoneType is not iterable'.
         """
         def __init__(self, controlnet):
             super().__init__()
             self.controlnet = controlnet
 
         def forward(self, sample, timestep, encoder_hidden_states,
-                    controlnet_cond, conditioning_scale):
+                    controlnet_cond, conditioning_scale,
+                    text_embeds, time_ids):
+            added_cond_kwargs = {
+                "text_embeds": text_embeds,
+                "time_ids": time_ids,
+            }
             down_samples, mid_sample = self.controlnet(
                 sample,
                 timestep,
                 encoder_hidden_states=encoder_hidden_states,
                 controlnet_cond=controlnet_cond,
                 conditioning_scale=conditioning_scale,
+                added_cond_kwargs=added_cond_kwargs,
                 return_dict=False,
             )
             # down_samples là tuple 9 tensors, mid_sample là 1 tensor
@@ -548,6 +571,8 @@ def export_controlnet(args, dtype):
         torch.randn(B, 77, 2048, dtype=dt, device=args.device),           # encoder_hidden_states
         torch.randn(B, 3, H * 8, W * 8, dtype=dt, device=args.device),   # controlnet_cond (face kps)
         torch.tensor(1.0, dtype=dt, device=args.device),                  # conditioning_scale
+        torch.randn(B, 1280, dtype=dt, device=args.device),               # text_embeds (pooled)
+        torch.randn(B, 6, dtype=dt, device=args.device),                  # time_ids (SDXL: 6 values)
     )
 
     # Output names: 9 down + 1 mid
@@ -557,16 +582,19 @@ def export_controlnet(args, dtype):
         "sample": {0: "batch", 2: "height", 3: "width"},
         "encoder_hidden_states": {0: "batch"},
         "controlnet_cond": {0: "batch", 2: "img_height", 3: "img_width"},
+        "text_embeds": {0: "batch"},
+        "time_ids": {0: "batch"},
     }
     for name in output_names:
         dynamic_axes[name] = {0: "batch"}
 
     save_onnx(
-        ControlNetWrapper(controlnet),
+        ControlNetWrapper(controlnet).eval(),
         dummy_inputs,
         out_path,
         input_names=["sample", "timestep", "encoder_hidden_states",
-                     "controlnet_cond", "conditioning_scale"],
+                     "controlnet_cond", "conditioning_scale",
+                     "text_embeds", "time_ids"],
         output_names=output_names,
         dynamic_axes=dynamic_axes,
         opset=args.opset,
@@ -696,7 +724,7 @@ def export_ip_adapter(args, dtype):
     dummy = torch.randn(1, 512, dtype=dt)
 
     save_onnx(
-        ResamplerWrapper(resampler),
+        ResamplerWrapper(resampler).eval(),
         (dummy,),
         out_path,
         input_names=["face_embedding"],
