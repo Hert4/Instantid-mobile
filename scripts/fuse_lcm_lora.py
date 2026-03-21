@@ -80,6 +80,12 @@ def parse_args():
         default="cpu",
         help="Device for loading (cpu/cuda). CPU để tránh VRAM limit khi fuse.",
     )
+    parser.add_argument(
+        "--delete_source",
+        action="store_true",
+        help="Xóa sdxl_path sau khi load vào memory để giải phóng disk trước khi save. "
+             "Hữu ích trên Colab khi disk gần đầy.",
+    )
     return parser.parse_args()
 
 
@@ -163,6 +169,30 @@ def fuse_lora_weights(args):
     print(f"  Scheduler: {type(pipe.scheduler).__name__}")
     print(f"  Recommended inference steps: 4-8")
     print(f"  Recommended guidance_scale: 0.0 (disable CFG = 2x faster)")
+
+    # Xóa source model trước khi save để giải phóng disk (pipeline đã trong memory)
+    if args.delete_source and os.path.exists(args.sdxl_path):
+        import shutil
+        src_size = sum(
+            os.path.getsize(os.path.join(dp, f))
+            for dp, _, fns in os.walk(args.sdxl_path) for f in fns
+        ) / (1024**3)
+        print(f"\n  [disk] Xóa {args.sdxl_path} ({src_size:.1f} GB) — pipeline đã trong memory")
+        shutil.rmtree(args.sdxl_path)
+        print(f"  [disk] Freed {src_size:.1f} GB")
+
+    # Xóa HuggingFace cache nếu có
+    if args.delete_source:
+        hf_cache = os.path.expanduser("~/.cache/huggingface/hub")
+        if os.path.exists(hf_cache):
+            import shutil
+            cache_size = sum(
+                os.path.getsize(os.path.join(dp, f))
+                for dp, _, fns in os.walk(hf_cache) for f in fns
+            ) / (1024**3)
+            if cache_size > 1.0:
+                print(f"  [disk] Xóa HuggingFace cache ({cache_size:.1f} GB)")
+                shutil.rmtree(hf_cache)
 
     print(f"\n[5/5] Saving fused model to {args.output_path}")
     os.makedirs(args.output_path, exist_ok=True)
