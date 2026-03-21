@@ -80,6 +80,20 @@ def save_onnx(model, dummy_inputs, output_path, input_names, output_names,
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     print(f"  → Exporting to {output_path} ...")
     with torch.no_grad():
+        # ── Cast to float32 CPU for reliable ONNX serialization ──────────
+        # float16 on CUDA → TorchScript exporter often produces empty/corrupt
+        # ONNX files (graph skeleton only, no weights). Export float32 → then
+        # quantize to INT8 via quantize_all.py.
+        print("    Casting model to float32 CPU for ONNX export...")
+        model = model.float().cpu()
+        if isinstance(dummy_inputs, tuple):
+            dummy_inputs = tuple(
+                x.float().cpu() if x.is_floating_point() else x.cpu()
+                for x in dummy_inputs
+            )
+        elif isinstance(dummy_inputs, torch.Tensor):
+            dummy_inputs = dummy_inputs.float().cpu() if dummy_inputs.is_floating_point() else dummy_inputs.cpu()
+
         # dynamo=False: force legacy ONNX exporter (TorchScript-based).
         # PyTorch 2.5+ mặc định dùng dynamo exporter mới, nhưng nó không
         # tương thích với diffusion models (ControlNet added_cond_kwargs,
