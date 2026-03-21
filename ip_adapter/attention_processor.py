@@ -163,11 +163,12 @@ class IPAttnProcessor(nn.Module):
             attention_probs = attn.get_attention_scores(query, key, attention_mask)
             hidden_states = torch.bmm(attention_probs, value)
         hidden_states = attn.batch_to_head_dim(hidden_states)
-        
-        # for ip-adapter
+
+        # for ip-adapter — cast to match weight dtype (fixes Half/Float mismatch during ONNX export)
+        ip_hidden_states = ip_hidden_states.to(self.to_k_ip.weight.dtype)
         ip_key = self.to_k_ip(ip_hidden_states)
         ip_value = self.to_v_ip(ip_hidden_states)
-        
+
         ip_key = attn.head_to_batch_dim(ip_key)
         ip_value = attn.head_to_batch_dim(ip_value)
         
@@ -398,7 +399,8 @@ class IPAttnProcessor2_0(torch.nn.Module):
         hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn.heads * head_dim)
         hidden_states = hidden_states.to(query.dtype)
 
-        # for ip-adapter
+        # for ip-adapter — cast to match weight dtype (fixes Half/Float mismatch during ONNX export)
+        ip_hidden_states = ip_hidden_states.to(self.to_k_ip.weight.dtype)
         ip_key = self.to_k_ip(ip_hidden_states)
         ip_value = self.to_v_ip(ip_hidden_states)
 

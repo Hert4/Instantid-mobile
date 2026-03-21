@@ -313,22 +313,20 @@ def _inject_ip_adapter_into_unet(unet, ip_adapter_path, dtype):
     attn_procs = {}
     ip_layer_idx = 0
 
+    dt_torch = torch.float16 if dtype == "float16" else torch.float32
+    cross_attention_dim = unet.config.cross_attention_dim
+    # Normalize to int for IPAttnProcessor constructor
+    ca_dim = cross_attention_dim[0] if isinstance(cross_attention_dim, list) else cross_attention_dim
+
     for name in unet.attn_processors.keys():
         # cross_attention layers nhận encoder_hidden_states
         if name.endswith("attn2.processor"):
-            # Lấy hidden_size từ UNet config
-            cross_attention_dim = unet.config.cross_attention_dim
-            if isinstance(cross_attention_dim, list):
-                # SDXL có nhiều levels
-                layer_name = name.split(".")[0]
-                hidden_size = _get_hidden_size(unet, name)
-            else:
-                hidden_size = cross_attention_dim
+            # hidden_size phụ thuộc vào level trong UNet (320/640/1280), KHÔNG phải cross_attention_dim
+            hidden_size = _get_hidden_size(unet, name)
 
             proc = IPAttnProcessor(
                 hidden_size=hidden_size,
-                cross_attention_dim=cross_attention_dim if not isinstance(cross_attention_dim, list)
-                                   else cross_attention_dim[0],
+                cross_attention_dim=ca_dim,
                 num_tokens=16,  # Resampler num_queries=16
             )
 
@@ -336,12 +334,11 @@ def _inject_ip_adapter_into_unet(unet, ip_adapter_path, dtype):
             key_k = f"{ip_layer_idx}.to_k_ip.weight"
             key_v = f"{ip_layer_idx}.to_v_ip.weight"
             if key_k in ip_layers and key_v in ip_layers:
-                proc.to_k_ip.weight.data = ip_layers[key_k].to(
-                    torch.float16 if dtype == "float16" else torch.float32
-                )
-                proc.to_v_ip.weight.data = ip_layers[key_v].to(
-                    torch.float16 if dtype == "float16" else torch.float32
-                )
+                proc.to_k_ip.weight.data = ip_layers[key_k].to(dt_torch)
+                proc.to_v_ip.weight.data = ip_layers[key_v].to(dt_torch)
+
+            # Cast toàn bộ processor sang đúng dtype (phòng trường hợp key không match)
+            proc = proc.to(dt_torch)
             ip_layer_idx += 1
 
             attn_procs[name] = proc
