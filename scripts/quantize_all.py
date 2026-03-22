@@ -69,8 +69,12 @@ def parse_args():
     return p.parse_args()
 
 
-def _convert_fp16_to_fp32(input_path: str, output_path: str):
-    """Convert FP16 ONNX model to FP32 for quantization compatibility."""
+def _convert_fp16_to_fp32(input_path: str, output_path: str,
+                          save_external=False):
+    """Convert FP16 ONNX model to FP32 for quantization compatibility.
+
+    save_external: if True, save with external data format (for large models).
+    """
     import onnx
     from onnx import numpy_helper, TensorProto
     import numpy as np
@@ -103,9 +107,22 @@ def _convert_fp16_to_fp32(input_path: str, output_path: str):
                 attr.i = TensorProto.FLOAT
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    onnx.save(model, output_path)
+    if save_external:
+        onnx.save(model, output_path,
+                  save_as_external_data=True,
+                  all_tensors_to_one_file=True,
+                  location="weights_fp32.pb")
+    else:
+        onnx.save(model, output_path)
     del model
-    print(f"  FP32 model saved: {os.path.getsize(output_path)/1024**2:.0f} MB")
+
+    out_dir = os.path.dirname(output_path)
+    total = sum(
+        os.path.getsize(os.path.join(out_dir, f))
+        for f in os.listdir(out_dir)
+        if os.path.isfile(os.path.join(out_dir, f))
+    ) / 1024**2
+    print(f"  FP32 model saved: {total:.0f} MB")
 
 
 def quantize_model(input_path: str, output_path: str,
@@ -153,20 +170,52 @@ def quantize_model(input_path: str, output_path: str,
         print(f"  (large model — freed memory, optimize_model=False)")
 
     # Check if model is FP16 — quantize_dynamic needs FP32
+    import onnx
     actual_input = input_path
-    fp32_tmp = None
-    if not has_external:
-        import onnx
-        m = onnx.load(input_path, load_external_data=False)
+    fp32_tmp_dir = None
+
+    m = onnx.load(input_path, load_external_data=False)
+    is_fp16 = any(
+        init.data_type == onnx.TensorProto.FLOAT16
+        for init in m.graph.initializer
+    )
+    # For external data models, also check graph inputs
+    if not is_fp16 and has_external:
         is_fp16 = any(
-            init.data_type == onnx.TensorProto.FLOAT16
-            for init in m.graph.initializer
+            inp.type.tensor_type.elem_type == onnx.TensorProto.FLOAT16
+            for inp in m.graph.input
         )
-        del m
-        if is_fp16:
-            fp32_tmp = input_path.replace(".onnx", "_fp32_tmp.onnx")
-            _convert_fp16_to_fp32(input_path, fp32_tmp)
-            actual_input = fp32_tmp
+    del m
+
+    if is_fp16:
+        # Very large models (> 4GB fp16 → > 8GB fp32) won't fit in RAM
+        if input_size > 4000:
+            print(f"  ⚠ Model too large for FP16→FP32 conversion ({input_size:.0f} MB)")
+            print(f"  → Copying FP16 model directly (no quantization)")
+            # Copy all files from input dir to output dir
+            out_dir = os.path.dirname(output_path)
+            os.makedirs(out_dir, exist_ok=True)
+            for f in os.listdir(input_dir):
+                src = os.path.join(input_dir, f)
+                dst = os.path.join(out_dir, f)
+                if os.path.isfile(src) and not os.path.exists(dst):
+                    shutil.copy2(src, dst)
+            # Rename model.onnx → model_int8.onnx if needed
+            orig = os.path.join(out_dir, "model.onnx")
+            if os.path.exists(orig) and not os.path.exists(output_path):
+                os.rename(orig, output_path)
+            return
+        else:
+            # Convert FP16 → FP32 in temp dir
+            fp32_tmp_dir = os.path.join(input_dir, "_fp32_tmp")
+            os.makedirs(fp32_tmp_dir, exist_ok=True)
+            fp32_path = os.path.join(fp32_tmp_dir, "model.onnx")
+            _convert_fp16_to_fp32(input_path, fp32_path,
+                                  save_external=has_external)
+            actual_input = fp32_path
+            # Update has_external for the fp32 temp
+            has_external = os.path.exists(
+                os.path.join(fp32_tmp_dir, "weights_fp32.pb"))
 
     quantize_dynamic(
         model_input=actual_input,
@@ -182,9 +231,9 @@ def quantize_model(input_path: str, output_path: str,
         use_external_data_format=has_external,
     )
 
-    # Cleanup fp32 temp file
-    if fp32_tmp and os.path.exists(fp32_tmp):
-        os.remove(fp32_tmp)
+    # Cleanup fp32 temp
+    if fp32_tmp_dir and os.path.exists(fp32_tmp_dir):
+        shutil.rmtree(fp32_tmp_dir, ignore_errors=True)
 
     # Calculate output size (including external data if any)
     output_dir = os.path.dirname(output_path)
