@@ -69,6 +69,45 @@ def parse_args():
     return p.parse_args()
 
 
+def _convert_fp16_to_fp32(input_path: str, output_path: str):
+    """Convert FP16 ONNX model to FP32 for quantization compatibility."""
+    import onnx
+    from onnx import numpy_helper, TensorProto
+    import numpy as np
+
+    print(f"  Converting FP16 → FP32...")
+    model = onnx.load(input_path, load_external_data=True)
+
+    # Convert all float16 initializers to float32
+    for init in model.graph.initializer:
+        if init.data_type == TensorProto.FLOAT16:
+            arr = numpy_helper.to_array(init).astype(np.float32)
+            new_tensor = numpy_helper.from_array(arr, name=init.name)
+            init.CopyFrom(new_tensor)
+
+    # Convert graph input/output types
+    for io_list in [model.graph.input, model.graph.output]:
+        for io in io_list:
+            if io.type.tensor_type.elem_type == TensorProto.FLOAT16:
+                io.type.tensor_type.elem_type = TensorProto.FLOAT
+
+    # Convert node attributes and intermediate value_info
+    for vi in model.graph.value_info:
+        if vi.type.tensor_type.elem_type == TensorProto.FLOAT16:
+            vi.type.tensor_type.elem_type = TensorProto.FLOAT
+
+    # Cast ops that reference float16 — update to float
+    for node in model.graph.node:
+        for attr in node.attribute:
+            if attr.name == "to" and attr.i == TensorProto.FLOAT16:
+                attr.i = TensorProto.FLOAT
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    onnx.save(model, output_path)
+    del model
+    print(f"  FP32 model saved: {os.path.getsize(output_path)/1024**2:.0f} MB")
+
+
 def quantize_model(input_path: str, output_path: str,
                    per_channel: bool = True, reduce_range: bool = False):
     """
@@ -113,8 +152,24 @@ def quantize_model(input_path: str, output_path: str,
             pass
         print(f"  (large model — freed memory, optimize_model=False)")
 
+    # Check if model is FP16 — quantize_dynamic needs FP32
+    actual_input = input_path
+    fp32_tmp = None
+    if not has_external:
+        import onnx
+        m = onnx.load(input_path, load_external_data=False)
+        is_fp16 = any(
+            init.data_type == onnx.TensorProto.FLOAT16
+            for init in m.graph.initializer
+        )
+        del m
+        if is_fp16:
+            fp32_tmp = input_path.replace(".onnx", "_fp32_tmp.onnx")
+            _convert_fp16_to_fp32(input_path, fp32_tmp)
+            actual_input = fp32_tmp
+
     quantize_dynamic(
-        model_input=input_path,
+        model_input=actual_input,
         model_output=output_path,
         weight_type=QuantType.QInt8,
         per_channel=per_channel,
@@ -126,6 +181,10 @@ def quantize_model(input_path: str, output_path: str,
         optimize_model=not is_large,
         use_external_data_format=has_external,
     )
+
+    # Cleanup fp32 temp file
+    if fp32_tmp and os.path.exists(fp32_tmp):
+        os.remove(fp32_tmp)
 
     # Calculate output size (including external data if any)
     output_dir = os.path.dirname(output_path)
