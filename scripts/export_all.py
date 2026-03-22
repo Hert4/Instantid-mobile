@@ -196,6 +196,30 @@ def _export_with_external_data(model, dummy_inputs, output_path,
           f"{len(param_inputs)} parameters")
     print(f"    PyTorch params: {len(param_values)}")
 
+    # ── Helper: get ONNX input shape as tuple ──────────────────────────
+    def _onnx_input_shape(inp):
+        try:
+            return tuple(d.dim_value for d in inp.type.tensor_type.shape.dim)
+        except Exception:
+            return None
+
+    # ── Helper: write one param to external data ─────────────────────
+    def _write_param(df, onnx_model, name, value, data_filename, offset):
+        raw = value.tobytes()
+        df.write(raw)
+        tensor = numpy_helper.from_array(value, name=name)
+        tensor.ClearField("raw_data")
+        tensor.data_location = TensorProto.EXTERNAL
+        del tensor.external_data[:]
+        for k, v in [("location", data_filename),
+                     ("offset", str(offset)),
+                     ("length", str(len(raw)))]:
+            e = tensor.external_data.add()
+            e.key = k
+            e.value = v
+        onnx_model.graph.initializer.append(tensor)
+        return offset + len(raw)
+
     # Step 3: Write external data file + create initializers
     print(f"    Step 3/3: Writing external data...")
     data_filename = "weights.pb"
@@ -203,42 +227,48 @@ def _export_with_external_data(model, dummy_inputs, output_path,
 
     offset = 0
     matched = 0
-    unmatched = []
+    used_pytorch = set()       # Track used PyTorch param names
+    pending_onnx = []          # ONNX inputs not matched by name
 
     with open(data_path, "wb") as df:
+        # ── Pass 1: exact name match ─────────────────────────────────
         for pinp in param_inputs:
             name = pinp.name
             value = param_values.get(name)
             if value is None:
-                # Try "/" → "." replacement
+                value = param_values.get(name.replace("/", "."))
+            if value is not None:
+                offset = _write_param(df, onnx_model, name, value,
+                                      data_filename, offset)
+                used_pytorch.add(name)
                 alt = name.replace("/", ".")
-                value = param_values.get(alt)
+                used_pytorch.add(alt)
+                matched += 1
+            else:
+                pending_onnx.append(pinp)
 
-            if value is None:
-                unmatched.append(name)
-                continue
+        # ── Pass 2: shape-based match for onnx::Mul_*, onnx::Add_* etc ──
+        # TorchScript renames GroupNorm/LayerNorm params to generic names.
+        # Match by shape: group remaining PyTorch params by shape, then
+        # consume in order for each unmatched ONNX input with same shape.
+        if pending_onnx:
+            from collections import defaultdict
+            shape_queue = defaultdict(list)  # shape → [(name, value), ...]
+            for pname, pval in param_values.items():
+                if pname not in used_pytorch:
+                    shape_queue[pval.shape].append((pname, pval))
 
-            raw = value.tobytes()
-            df.write(raw)
-
-            # Create ONNX tensor proto with external data reference
-            tensor = numpy_helper.from_array(value, name=name)
-            tensor.ClearField("raw_data")
-            tensor.data_location = TensorProto.EXTERNAL
-            del tensor.external_data[:]
-            entry_loc = tensor.external_data.add()
-            entry_loc.key = "location"
-            entry_loc.value = data_filename
-            entry_off = tensor.external_data.add()
-            entry_off.key = "offset"
-            entry_off.value = str(offset)
-            entry_len = tensor.external_data.add()
-            entry_len.key = "length"
-            entry_len.value = str(len(raw))
-
-            onnx_model.graph.initializer.append(tensor)
-            offset += len(raw)
-            matched += 1
+            still_unmatched = []
+            for pinp in pending_onnx:
+                oshape = _onnx_input_shape(pinp)
+                if oshape and oshape in shape_queue and shape_queue[oshape]:
+                    pname, pval = shape_queue[oshape].pop(0)
+                    offset = _write_param(df, onnx_model, pinp.name, pval,
+                                          data_filename, offset)
+                    used_pytorch.add(pname)
+                    matched += 1
+                else:
+                    still_unmatched.append(pinp.name)
 
     # Replace inputs: remove param inputs, keep regular inputs only
     del onnx_model.graph.input[:]
@@ -253,10 +283,11 @@ def _export_with_external_data(model, dummy_inputs, output_path,
         os.remove(graph_path)
 
     data_mb = os.path.getsize(data_path) / 1024**2
-    if unmatched:
-        print(f"    ⚠ {len(unmatched)} unmatched params (first 5: "
-              f"{unmatched[:5]})")
-    print(f"    Frozen {matched} params → external data {data_mb:.0f} MB")
+    if still_unmatched:
+        print(f"    ⚠ {len(still_unmatched)} unmatched (first 5: "
+              f"{still_unmatched[:5]})")
+    print(f"    Frozen {matched}/{len(param_inputs)} params "
+          f"→ external data {data_mb:.0f} MB")
 
 
 def report_size(path):
