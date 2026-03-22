@@ -180,7 +180,7 @@ class FaceProcessor:
         bgr = padded[:, :, ::-1].astype(np.float32)
         mean = np.array([127.5, 127.5, 127.5])
         std  = np.array([128.0, 128.0, 128.0])
-        bgr = (bgr - mean) / std
+        bgr = ((bgr - mean) / std).astype(np.float32)
         inp = bgr.transpose(2, 0, 1)[np.newaxis]  # [1, 3, H, W]
 
         det_out = run_session(self.det_session, {"input.1": inp})
