@@ -95,7 +95,23 @@ def quantize_model(input_path: str, output_path: str,
     print(f"  Input:  {input_size:.0f} MB (total dir)")
     print(f"  Output: {output_path}")
 
+    # Check if model uses external data (weights.pb)
+    has_external = os.path.exists(os.path.join(input_dir, "weights.pb"))
+    is_large = input_size > 1500  # > 1.5GB
+
     t0 = time.time()
+
+    # Free memory before quantizing large models
+    if is_large:
+        import gc
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+        print(f"  (large model — freed memory, optimize_model=False)")
 
     quantize_dynamic(
         model_input=input_path,
@@ -103,15 +119,23 @@ def quantize_model(input_path: str, output_path: str,
         weight_type=QuantType.QInt8,
         per_channel=per_channel,
         reduce_range=reduce_range,
-        # Quantize tất cả nodes có thể (MatMul, Conv)
         nodes_to_exclude=[],
-        # Giữ một số ops ở FP32 để tránh artifacts
         op_types_to_quantize=["MatMul", "Gather", "Transpose"],
+        # Large models: skip internal optimization (saves RAM),
+        # use external data format for output
+        optimize_model=not is_large,
+        use_external_data_format=has_external,
     )
 
-    output_size = os.path.getsize(output_path) / 1024**2
+    # Calculate output size (including external data if any)
+    output_dir = os.path.dirname(output_path)
+    output_size = sum(
+        os.path.getsize(os.path.join(output_dir, f))
+        for f in os.listdir(output_dir)
+        if os.path.isfile(os.path.join(output_dir, f))
+    ) / 1024**2
     elapsed = time.time() - t0
-    ratio = input_size / output_size
+    ratio = input_size / max(output_size, 1)
 
     print(f"  Output: {output_size:.0f} MB ({ratio:.1f}x smaller)")
     print(f"  Time:   {elapsed:.0f}s")
