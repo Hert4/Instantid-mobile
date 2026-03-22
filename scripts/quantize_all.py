@@ -122,6 +122,7 @@ def onnx_slim(input_path: str, output_path: str):
     Optimize ONNX graph trước khi quantize dùng onnxslim.
     Removes dead nodes, fuses ops, improves layout.
     """
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     try:
         import onnxslim
         print(f"  Running onnxslim optimization...")
