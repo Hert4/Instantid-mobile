@@ -268,7 +268,33 @@ def _export_with_external_data(model, dummy_inputs, output_path,
                     used_pytorch.add(pname)
                     matched += 1
                 else:
-                    still_unmatched.append(pinp.name)
+                    still_unmatched.append(pinp)
+
+            # ── Pass 3: positional order match for remaining ────────────
+            # Some ONNX inputs have dynamic dims (dim_value=0) so shape
+            # matching fails.  Pair remaining ONNX inputs with remaining
+            # PyTorch params in declaration order (1:1).
+            if still_unmatched:
+                remaining_pytorch = [
+                    (n, v) for n, v in param_values.items()
+                    if n not in used_pytorch
+                ]
+                pass3_matched = 0
+                final_unmatched = []
+                for i, pinp in enumerate(still_unmatched):
+                    if i < len(remaining_pytorch):
+                        pname, pval = remaining_pytorch[i]
+                        offset = _write_param(
+                            df, onnx_model, pinp.name, pval,
+                            data_filename, offset)
+                        used_pytorch.add(pname)
+                        matched += 1
+                        pass3_matched += 1
+                    else:
+                        final_unmatched.append(pinp.name)
+                if pass3_matched:
+                    print(f"    Pass 3 (positional): matched {pass3_matched} more")
+                still_unmatched = final_unmatched
 
     # Replace inputs: remove param inputs, keep regular inputs only
     del onnx_model.graph.input[:]
@@ -284,8 +310,9 @@ def _export_with_external_data(model, dummy_inputs, output_path,
 
     data_mb = os.path.getsize(data_path) / 1024**2
     if still_unmatched:
+        names = [s if isinstance(s, str) else s.name for s in still_unmatched]
         print(f"    ⚠ {len(still_unmatched)} unmatched (first 5: "
-              f"{still_unmatched[:5]})")
+              f"{names[:5]})")
     print(f"    Frozen {matched}/{len(param_inputs)} params "
           f"→ external data {data_mb:.0f} MB")
 
