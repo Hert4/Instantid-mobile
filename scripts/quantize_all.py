@@ -217,6 +217,13 @@ def quantize_model(input_path: str, output_path: str,
             has_external = os.path.exists(
                 os.path.join(fp32_tmp_dir, "weights_fp32.pb"))
 
+    # Note: optimize_model was removed in onnxruntime >= 1.16
+    # Use extra_options to control optimization instead
+    extra_options = {}
+    if is_large:
+        # Disable node fusion for large models to save RAM
+        extra_options["DisableShapeInference"] = True
+
     quantize_dynamic(
         model_input=actual_input,
         model_output=output_path,
@@ -225,10 +232,8 @@ def quantize_model(input_path: str, output_path: str,
         reduce_range=reduce_range,
         nodes_to_exclude=[],
         op_types_to_quantize=["MatMul", "Gather", "Transpose"],
-        # Large models: skip internal optimization (saves RAM),
-        # use external data format for output
-        optimize_model=not is_large,
         use_external_data_format=has_external,
+        extra_options=extra_options,
     )
 
     # Cleanup fp32 temp
